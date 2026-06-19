@@ -184,7 +184,6 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
   }
 
   const activeCount = providers.filter(p => p.active).length
-  const selected = providers.find(p => p.id === selectedProvider)
 
   return (
     <div className="space-y-6">

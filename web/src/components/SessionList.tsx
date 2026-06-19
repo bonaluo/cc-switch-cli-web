@@ -44,7 +44,7 @@ function SessionList() {
   const [error, setError] = useState<string | null>(null)
   const [showAll, setShowAll] = useState(false)
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null)
-  const [loadingDetail, setLoadingDetail] = useState(false)
+  const [, setLoadingDetail] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list')
 
