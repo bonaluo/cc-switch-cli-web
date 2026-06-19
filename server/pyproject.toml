@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cc-switch-web"
+version = "1.0.0"
+description = "Web interface for cc-switch-cli"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "websockets>=12.0",
+    "pydantic>=2.0",
+    "aiofiles>=23.0",
+]
+
+[project.scripts]
+cc-switch-web = "cc_switch_web.main:main"

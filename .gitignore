@@ -1,0 +1,36 @@
+# Node.js
+node_modules/
+*.log*
+npm-debug.log*
+dist-ssr
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build artifacts (keep dist for production, ignore in dev if needed)
+
+# Cache
+.cache/
+*.cache
