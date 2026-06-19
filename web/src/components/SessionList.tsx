@@ -12,6 +12,21 @@ interface Session {
   resumeCommand: string
 }
 
+// Convert snake_case to camelCase for session data from cc-switch JSON output
+function normalizeSession(raw: any): Session {
+  return {
+    providerId: raw.provider_id || raw.providerId || '',
+    sessionId: raw.session_id || raw.sessionId || '',
+    title: raw.title || '',
+    summary: raw.summary || '',
+    projectDir: raw.project_dir || raw.projectDir || '',
+    createdAt: raw.created_at || raw.createdAt || 0,
+    lastActiveAt: raw.last_active_at || raw.lastActiveAt || 0,
+    sourcePath: raw.source_path || raw.sourcePath || '',
+    resumeCommand: raw.resume_command || raw.resumeCommand || '',
+  }
+}
+
 interface SessionDetail {
   session: Session
   messages: Message[]
@@ -40,7 +55,8 @@ function SessionList() {
       const res = await fetch(`/api/sessions?all=${all}`)
       if (!res.ok) throw new Error('Failed to fetch sessions')
       const data = await res.json()
-      setSessions(data.sessions || [])
+      const sessionsList = (data.sessions || []).map(normalizeSession)
+      setSessions(sessionsList)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch sessions')
     } finally {
