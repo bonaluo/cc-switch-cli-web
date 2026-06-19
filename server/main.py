@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -6,6 +6,7 @@ import subprocess
 import json
 import os
 import re
+import sqlite3
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 
@@ -29,6 +30,7 @@ class Provider(BaseModel):
     name: str
     api_url: str
     active: bool = False
+    notes: str = ""
 
 
 class ProviderDetail(Provider):
@@ -51,6 +53,16 @@ class ProviderCreate(BaseModel):
     api_url: str
     api_key: str = ""
     model: str = "claude-sonnet-4-6"
+
+
+class ModelFieldUpdate(BaseModel):
+    path: List[str]
+    value: str
+
+
+class ProviderModelsUpdate(BaseModel):
+    fields: List[ModelFieldUpdate]
+    apply: bool = False
 
 
 class MCPCheckRequest(BaseModel):
@@ -116,12 +128,132 @@ def is_proxy_running() -> bool:
     return False
 
 
+def get_provider_notes() -> Dict[str, str]:
+    """Read provider notes from the local cc-switch database."""
+    try:
+        with open_provider_db(readonly=True) as conn:
+            rows = conn.execute("SELECT id, notes FROM providers WHERE notes IS NOT NULL AND notes != ''")
+            return {row[0]: row[1] for row in rows}
+    except sqlite3.Error:
+        return {}
+
+
+def get_db_path() -> str:
+    """Return the local cc-switch database path."""
+    return os.path.expanduser("~/.cc-switch/cc-switch.db")
+
+
+def open_provider_db(readonly: bool = True) -> sqlite3.Connection:
+    """Open the cc-switch SQLite database."""
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=500, detail=f"cc-switch database not found: {db_path}")
+    if readonly:
+        return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def load_provider_row(provider_id: str) -> Dict[str, Any]:
+    """Load a provider row from the database."""
+    with open_provider_db(readonly=True) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, app_type, name, settings_config, website_url, category, created_at,
+                   sort_index, notes, icon, icon_color, meta, is_current,
+                   in_failover_queue, cost_multiplier, limit_daily_usd,
+                   limit_monthly_usd, provider_type
+            FROM providers
+            WHERE id = ?
+            """,
+            (provider_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
+    return dict(row)
+
+
+def extract_api_url(settings_config: Dict[str, Any]) -> str:
+    """Extract a display API URL from app-specific settings config."""
+    env = settings_config.get("env") if isinstance(settings_config, dict) else None
+    if isinstance(env, dict):
+        for key in ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "BASE_URL", "API_BASE_URL"):
+            if env.get(key):
+                return str(env[key])
+    for key in ("base_url", "baseUrl", "api_base", "apiBase", "url"):
+        if isinstance(settings_config, dict) and settings_config.get(key):
+            return str(settings_config[key])
+    return ""
+
+
+def extract_model_fields(settings_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract editable model-like string fields from settings config."""
+    fields: List[Dict[str, Any]] = []
+
+    def walk(value: Any, path: List[str]):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                walk(child, path + [key])
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, path + [str(index)])
+        elif isinstance(value, str):
+            key = path[-1] if path else ""
+            joined = ".".join(path).lower()
+            if "model" in key.lower() or joined.endswith(".api"):
+                fields.append({
+                    "path": path,
+                    "label": ".".join(path),
+                    "value": value,
+                })
+
+    walk(settings_config, [])
+    return fields
+
+
+def set_config_value(config: Any, path: List[str], value: str) -> None:
+    """Set a nested string value in a JSON-compatible config object."""
+    if not path:
+        raise HTTPException(status_code=400, detail="Model field path cannot be empty")
+    target = config
+    for part in path[:-1]:
+        if isinstance(target, list):
+            if not part.isdigit() or int(part) >= len(target):
+                raise HTTPException(status_code=400, detail=f"Invalid model field path: {'.'.join(path)}")
+            target = target[int(part)]
+        elif isinstance(target, dict) and part in target:
+            target = target[part]
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid model field path: {'.'.join(path)}")
+    last = path[-1]
+    if isinstance(target, list):
+        if not last.isdigit() or int(last) >= len(target):
+            raise HTTPException(status_code=400, detail=f"Invalid model field path: {'.'.join(path)}")
+        if not isinstance(target[int(last)], str):
+            raise HTTPException(status_code=400, detail=f"Model field is not editable: {'.'.join(path)}")
+        target[int(last)] = value
+    elif isinstance(target, dict) and last in target:
+        if not isinstance(target[last], str):
+            raise HTTPException(status_code=400, detail=f"Model field is not editable: {'.'.join(path)}")
+        target[last] = value
+    else:
+        raise HTTPException(status_code=400, detail=f"Invalid model field path: {'.'.join(path)}")
+
+
+def serialize_config(config: Dict[str, Any]) -> str:
+    """Serialize provider settings config consistently for DB storage."""
+    return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
+
+
 # ---------------------------------------------------------------------------
 # Provider list parsing (cc-switch doesn't have --json for provider list)
 # ---------------------------------------------------------------------------
 
 def parse_provider_list(stdout: str) -> List[Provider]:
     """Parse cc-switch provider list output."""
+    provider_notes = get_provider_notes()
     providers = []
     lines = stdout.strip().split('\n')
     for line in lines[2:]:
@@ -139,7 +271,13 @@ def parse_provider_list(stdout: str) -> List[Provider]:
         name = parts[2].strip()
         api_url = parts[3].strip().rstrip('│').strip()
         if provider_id and name:
-            providers.append(Provider(id=provider_id, name=name, api_url=api_url, active=active))
+            providers.append(Provider(
+                id=provider_id,
+                name=name,
+                api_url=api_url,
+                active=active,
+                notes=provider_notes.get(provider_id, "")
+            ))
     return providers
 
 
@@ -224,11 +362,11 @@ def get_providers():
 
 @app.get("/api/providers/{provider_id}")
 def get_provider_detail(provider_id: str):
-    """Get detailed info about a provider (health, config)."""
-    # Query the database for provider metadata
-    stdout, stderr, rc = run_cc_switch(["config", "export", "/dev/stdout"])
-    if rc != 0:
-        # Fallback: just return from provider list
+    """Get detailed info about a provider (health, config) from DB."""
+    try:
+        row = load_provider_row(provider_id)
+    except HTTPException:
+        # Fallback to provider list
         plist_stdout, _, _ = run_cc_switch(["provider", "list"])
         providers = parse_provider_list(plist_stdout)
         for p in providers:
@@ -236,42 +374,84 @@ def get_provider_detail(provider_id: str):
                 return {"provider": p.model_dump(), "health": None, "quota": None, "models": None}
         raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
 
-    # Try to extract provider info from config dump (SQL)
-    detail: Dict[str, Any] = {"provider": None, "health": None, "quota": None, "models": None}
+    settings = json.loads(row["settings_config"]) if row["settings_config"] else {}
+    api_url = extract_api_url(settings)
+    model_fields = extract_model_fields(settings)
 
-    # Parse the SQL dump for this provider's INSERT row
-    # Look for: INSERT INTO providers VALUES('id','claude','name',...
-    pattern = re.compile(
-        r"INSERT INTO providers VALUES\('([^']*)','([^']*)','([^']*)','([^']*)'[^;]*\);"
-    )
-    for m in pattern.finditer(stdout):
-        pid, app_type, pname, settings_config = m.group(1), m.group(2), m.group(3), m.group(4)
-        if pid == provider_id:
-            detail["provider"] = {
-                "id": pid,
-                "app_type": app_type,
-                "name": pname,
-                "settings_config": settings_config,
-            }
-            break
+    # Health info from DB (if any)
+    health = None
+    try:
+        with open_provider_db(readonly=True) as _conn:
+            for h in _conn.execute(
+                "SELECT is_healthy,consecutive_failures,last_error,updated_at "
+                "FROM provider_health WHERE provider_id=?",
+                (provider_id,)
+            ).fetchall():
+                health = {
+                    "is_healthy": bool(h[0]),
+                    "consecutive_failures": h[1],
+                    "last_error": h[2],
+                    "updated_at": h[3],
+                }
+    except sqlite3.Error:
+        pass
 
-    # Look for health info
-    health_pattern = re.compile(
-        r"INSERT INTO provider_health VALUES\('([^']*)','([^']*)',(\d+),(\d+),'([^']*)','([^']*)','([^']*)','([^']*)'\);"
-    )
-    for m in health_pattern.finditer(stdout):
-        if m.group(1) == provider_id:
-            detail["health"] = {
-                "is_healthy": bool(int(m.group(3))),
-                "consecutive_failures": int(m.group(4)),
-                "last_success_at": m.group(5),
-                "last_failure_at": m.group(6),
-                "last_error": m.group(7),
-                "updated_at": m.group(8),
-            }
-            break
+    return {
+        "provider": {
+            "id": row["id"],
+            "app_type": row["app_type"],
+            "name": row["name"],
+            "settings_config": settings,
+            "api_url": api_url,
+            "notes": row["notes"] or "",
+            "category": row["category"] or "",
+            "website_url": row["website_url"] or "",
+            "icon": row["icon"] or "",
+            "is_current": bool(row["is_current"]),
+            "in_failover_queue": bool(row["in_failover_queue"]),
+            "cost_multiplier": row["cost_multiplier"],
+        },
+        "health": health,
+        "model_fields": model_fields,
+    }
 
-    return detail
+
+@app.put("/api/providers/{provider_id}/models")
+def update_provider_models(provider_id: str, payload: ProviderModelsUpdate = Body(...)):
+    """Save model field changes directly to DB, optionally apply the provider."""
+    row = load_provider_row(provider_id)
+    try:
+        settings = json.loads(row["settings_config"]) if row["settings_config"] else {}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Provider config is not valid JSON")
+
+    for field in payload.fields:
+        set_config_value(settings, field.path, field.value)
+
+    serialized = serialize_config(settings)
+    try:
+        with open_provider_db(readonly=False) as conn:
+            conn.execute(
+                "UPDATE providers SET settings_config = ? WHERE id = ?",
+                (serialized, provider_id)
+            )
+    except sqlite3.Error as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update provider DB: {e}")
+
+    applied = False
+    if payload.apply:
+        stdout, stderr, rc = run_cc_switch(["use", provider_id])
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"Save succeeded but apply failed: {stderr}")
+        applied = True
+
+    return {
+        "success": True,
+        "saved": True,
+        "applied": applied,
+        "provider_id": provider_id,
+        "updated_fields": len(payload.fields)
+    }
 
 
 @app.post("/api/providers/{provider_id}/switch")
