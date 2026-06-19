@@ -539,6 +539,7 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
                                       <div className="relative">
                                         <input
                                           type="password"
+                                          data-field={field.label}
                                           value={modelEdits[field.label] ?? field.value}
                                           onChange={(e) => setModelEdits(prev => ({ ...prev, [field.label]: e.target.value }))}
                                           disabled={savingModels}
