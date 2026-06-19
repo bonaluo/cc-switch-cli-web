@@ -10,6 +10,7 @@ export interface Provider {
   name: string
   api_url: string
   active: boolean
+  notes: string
 }
 
 const tabs = [

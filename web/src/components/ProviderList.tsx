@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 
 export interface Provider {
   id: string
   name: string
   api_url: string
   active: boolean
+  notes: string
 }
 
 interface ProviderListProps {
@@ -41,6 +42,7 @@ interface ProviderDetailData {
   health: any
   quota: any
   models: any
+  model_fields: any[]
 }
 
 interface SpeedtestOutput {
@@ -67,10 +69,26 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
   const [quotaResult, setQuotaResult] = useState<QuotaOutput | null>(null)
   const [modelsResult, setModelsResult] = useState<ModelsOutput | null>(null)
   const [loadingAction, setLoadingAction] = useState<string | null>(null)
+  const [modelEdits, setModelEdits] = useState<Record<string, string>>({})
+  const [savingModels, setSavingModels] = useState(false)
+
+  // Reset modelEdits when a new provider detail is loaded
+  useEffect(() => {
+    if (providerDetail?.model_fields) {
+      const edits: Record<string, string> = {}
+      for (const f of providerDetail.model_fields) {
+        edits[f.label] = f.value
+      }
+      setModelEdits(edits)
+    } else {
+      setModelEdits({})
+    }
+  }, [providerDetail?.model_fields])
 
   const filtered = providers.filter(p =>
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.api_url.toLowerCase().includes(searchTerm.toLowerCase())
+    p.api_url.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    p.notes.toLowerCase().includes(searchTerm.toLowerCase())
   )
 
   const sorted = [...filtered].sort((a, b) => {
@@ -171,6 +189,38 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
       setModelsResult({ output: `Error: ${err instanceof Error ? err.message : 'Failed'}` })
     } finally {
       setLoadingAction(null)
+    }
+  }
+
+  const handleSaveModels = async (providerId: string, apply: boolean) => {
+    setSavingModels(true)
+    setActionFeedback(null)
+    try {
+      const fields = Object.entries(modelEdits).map(([label, value]) => ({
+        path: label.split('.'),
+        value
+      }))
+      const res = await fetch(`/api/providers/${providerId}/models`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields, apply })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Save failed')
+      setActionFeedback(apply ? '✅ Saved & Applied' : '✅ Saved')
+      // Refresh detail to confirm
+      const detailRes = await fetch(`/api/providers/${providerId}`)
+      if (detailRes.ok) {
+        const detailData = await detailRes.json()
+        setProviderDetail(detailData)
+      }
+      if (apply) {
+        onRefresh()
+      }
+    } catch (err) {
+      setActionFeedback(err instanceof Error ? err.message : 'Save failed')
+    } finally {
+      setSavingModels(false)
     }
   }
 
@@ -296,6 +346,11 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
                       <p className="text-xs text-slate-400 truncate" title={provider.api_url}>
                         {provider.api_url}
                       </p>
+                      {provider.notes && (
+                        <p className="mt-1 text-xs text-amber-300/90 truncate" title={provider.notes}>
+                          📝 {provider.notes}
+                        </p>
+                      )}
                     </div>
                   </div>
                   {provider.active && (
@@ -383,6 +438,45 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
                             Failures: {providerDetail.health.consecutive_failures}
                           </span>
                         )}
+                      </div>
+                    )}
+
+                    {/* Model Fields Editor */}
+                    {providerDetail?.model_fields && providerDetail.model_fields.length > 0 && (
+                      <div className="p-3 rounded-lg bg-slate-900/30 border border-slate-700/30 space-y-2">
+                        <h4 className="text-xs font-semibold text-indigo-300 mb-2 flex items-center">
+                          🤖 Model Fields
+                        </h4>
+                        <div className="space-y-2">
+                          {providerDetail.model_fields.map((field: any) => (
+                            <div key={field.label} className="flex flex-col gap-1">
+                              <label className="text-xs text-slate-400 font-mono">{field.label}</label>
+                              <input
+                                type="text"
+                                value={modelEdits[field.label] ?? field.value}
+                                onChange={(e) => setModelEdits(prev => ({ ...prev, [field.label]: e.target.value }))}
+                                disabled={savingModels}
+                                className="px-3 py-1.5 rounded-md bg-slate-800/50 border border-slate-600/30 text-white text-xs focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                        <div className="flex flex-wrap gap-2 pt-2">
+                          <button
+                            onClick={() => handleSaveModels(provider.id, false)}
+                            disabled={savingModels}
+                            className="px-3 py-1.5 rounded-md text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-all disabled:opacity-50"
+                          >
+                            {savingModels ? 'Saving...' : '💾 Save'}
+                          </button>
+                          <button
+                            onClick={() => handleSaveModels(provider.id, true)}
+                            disabled={savingModels}
+                            className="px-3 py-1.5 rounded-md text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-50"
+                          >
+                            {savingModels ? 'Applying...' : '🚀 Save & Apply'}
+                          </button>
+                        </div>
                       </div>
                     )}
 
