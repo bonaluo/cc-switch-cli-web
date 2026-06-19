@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { copyToClipboard } from '../utils/clipboard'
 
 interface Session {
   providerId: string
@@ -118,29 +119,6 @@ function SessionList() {
       case 'tool': return 'border-amber-500/50 bg-amber-500/5'
       case 'system': return 'border-purple-500/50 bg-purple-500/5'
       default: return 'border-slate-500/50 bg-slate-500/5'
-    }
-  }
-
-  // Safe clipboard copy with fallback for HTTP/non-secure contexts
-  const copyToClipboard = async (text: string) => {
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text)
-        return true
-      }
-      // Fallback: use a temporary textarea to copy text
-      const textarea = document.createElement('textarea')
-      textarea.value = text
-      textarea.style.position = 'fixed'
-      textarea.style.opacity = '0'
-      document.body.appendChild(textarea)
-      textarea.select()
-      const success = document.execCommand('copy')
-      document.body.removeChild(textarea)
-      return success
-    } catch (err) {
-      console.error('Failed to copy to clipboard:', err)
-      return false
     }
   }
 
