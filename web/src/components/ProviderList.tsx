@@ -43,6 +43,7 @@ interface ProviderDetailData {
   quota: any
   models: any
   model_fields: any[]
+  meta_fields: any[]
 }
 
 interface SpeedtestOutput {
@@ -58,6 +59,28 @@ interface ModelsOutput {
   output: string
 }
 
+const CATEGORY_LABELS: Record<string, { title: string; icon: string }> = {
+  name: { title: 'Name', icon: '🏷️' },
+  notes: { title: 'Notes', icon: '📝' },
+  base_url: { title: 'Base URL', icon: '🔗' },
+  api_key: { title: 'API Key / Auth', icon: '🔑' },
+  api_mode: { title: 'API Format', icon: '⚙️' },
+  model: { title: 'Model', icon: '🤖' },
+  other: { title: 'Other', icon: '📌' },
+}
+
+function groupFieldsByCategory(fields: any[]): Map<string, any[]> {
+  const groups = new Map<string, any[]>()
+  for (const f of fields) {
+    const cat = f.category || 'other'
+    if (!groups.has(cat)) groups.set(cat, [])
+    groups.get(cat)!.push(f)
+  }
+  return groups
+}
+
+const CATEGORY_ORDER = ['name', 'notes', 'base_url', 'api_key', 'api_mode', 'model', 'other']
+
 function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListProps) {
   const [searchTerm, setSearchTerm] = useState('')
   const [switchingId, setSwitchingId] = useState<string | null>(null)
@@ -72,18 +95,21 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
   const [modelEdits, setModelEdits] = useState<Record<string, string>>({})
   const [savingModels, setSavingModels] = useState(false)
 
-  // Reset modelEdits when a new provider detail is loaded
+  // Build modelEdits from both meta_fields and model_fields when detail loads
   useEffect(() => {
+    const edits: Record<string, string> = {}
+    if (providerDetail?.meta_fields) {
+      for (const f of providerDetail.meta_fields) {
+        edits[f.label] = f.value
+      }
+    }
     if (providerDetail?.model_fields) {
-      const edits: Record<string, string> = {}
       for (const f of providerDetail.model_fields) {
         edits[f.label] = f.value
       }
-      setModelEdits(edits)
-    } else {
-      setModelEdits({})
     }
-  }, [providerDetail?.model_fields])
+    setModelEdits(edits)
+  }, [providerDetail?.meta_fields, providerDetail?.model_fields])
 
   const filtered = providers.filter(p =>
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -105,11 +131,7 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
 
   const handleDetail = async (providerId: string) => {
     if (selectedProvider === providerId) {
-      setSelectedProvider(null)
-      setProviderDetail(null)
-      setSpeedtestResult(null)
-      setQuotaResult(null)
-      setModelsResult(null)
+      closeModal()
       return
     }
     setSelectedProvider(providerId)
@@ -129,6 +151,14 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
     } finally {
       setLoadingDetail(false)
     }
+  }
+
+  const closeModal = () => {
+    setSelectedProvider(null)
+    setProviderDetail(null)
+    setSpeedtestResult(null)
+    setQuotaResult(null)
+    setModelsResult(null)
   }
 
   const handleDuplicate = async (providerId: string) => {
@@ -197,7 +227,7 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
     setActionFeedback(null)
     try {
       const fields = Object.entries(modelEdits).map(([label, value]) => ({
-        path: label.split('.'),
+        path: label.startsWith('_') ? [label] : label.split('.'),
         value
       }))
       const res = await fetch(`/api/providers/${providerId}/models`, {
@@ -234,6 +264,13 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
   }
 
   const activeCount = providers.filter(p => p.active).length
+
+  // Build all editable fields sorted: meta_fields first, then model_fields
+  const allFields = [
+    ...(providerDetail?.meta_fields || []),
+    ...(providerDetail?.model_fields || []),
+  ]
+  const fieldGroups = groupFieldsByCategory(allFields)
 
   return (
     <div className="space-y-6">
@@ -272,7 +309,6 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
           </svg>
         </div>
         <div className="flex items-center space-x-2">
-          {/* Add provider button - shows CLI instructions since TTY is required */}
           <button
             onClick={() => {
               const msg = 'Provider add/edit/delete require interactive TTY.\n\nTo add a provider, run in terminal:\n  cc-switch provider add\n\nOr use a template:\n  cc-switch provider add --template custom'
@@ -370,14 +406,9 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
 
                 {/* Action buttons */}
                 <div className="flex items-center justify-between gap-2">
-                  {/* Left: detail button */}
                   <button
                     onClick={() => handleDetail(provider.id)}
-                    className={`inline-flex items-center px-3 py-2 rounded-lg text-xs font-medium transition-all ${
-                      selectedProvider === provider.id
-                        ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                        : 'bg-slate-700/30 border border-slate-600/30 text-slate-400 hover:text-white hover:bg-slate-700/50'
-                    }`}
+                    className="inline-flex items-center px-3 py-2 rounded-lg text-xs font-medium transition-all bg-slate-700/30 border border-slate-600/30 text-slate-400 hover:text-white hover:bg-slate-700/50"
                   >
                     <svg className="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -385,7 +416,6 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
                     Details
                   </button>
 
-                  {/* Right: switch button */}
                   {provider.active ? (
                     <span className="inline-flex items-center px-3 py-2 rounded-lg bg-emerald-500/10 text-emerald-400 text-xs font-medium border border-emerald-500/20">
                       <svg className="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -412,151 +442,259 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
                 </div>
               </div>
             </div>
-
-            {/* Inline Detail Panel */}
-            {selectedProvider === provider.id && (
-              <div className="mt-2 glass rounded-xl border border-purple-500/20 p-4 space-y-3 animate-slide-in">
-                {loadingDetail ? (
-                  <div className="flex items-center justify-center py-8">
-                    <div className="animate-spin rounded-full h-6 w-6 border-2 border-purple-500/30 border-t-purple-500 mr-3" />
-                    <span className="text-sm text-slate-400">Loading details...</span>
-                  </div>
-                ) : (
-                  <>
-                    {/* Provider metadata */}
-                    {providerDetail?.health && (
-                      <div className="flex items-center space-x-3 text-xs">
-                        <span className={`px-2 py-0.5 rounded-full ${
-                          providerDetail.health.is_healthy
-                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                            : 'bg-red-500/10 text-red-400 border border-red-500/20'
-                        }`}>
-                          {providerDetail.health.is_healthy ? '● Healthy' : '● Unhealthy'}
-                        </span>
-                        {providerDetail.health.consecutive_failures > 0 && (
-                          <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                            Failures: {providerDetail.health.consecutive_failures}
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Model Fields Editor */}
-                    {providerDetail?.model_fields && providerDetail.model_fields.length > 0 && (
-                      <div className="p-3 rounded-lg bg-slate-900/30 border border-slate-700/30 space-y-2">
-                        <h4 className="text-xs font-semibold text-indigo-300 mb-2 flex items-center">
-                          🤖 Model Fields
-                        </h4>
-                        <div className="space-y-2">
-                          {providerDetail.model_fields.map((field: any) => (
-                            <div key={field.label} className="flex flex-col gap-1">
-                              <label className="text-xs text-slate-400 font-mono">{field.label}</label>
-                              <input
-                                type="text"
-                                value={modelEdits[field.label] ?? field.value}
-                                onChange={(e) => setModelEdits(prev => ({ ...prev, [field.label]: e.target.value }))}
-                                disabled={savingModels}
-                                className="px-3 py-1.5 rounded-md bg-slate-800/50 border border-slate-600/30 text-white text-xs focus:outline-none focus:border-indigo-500 disabled:opacity-50"
-                              />
-                            </div>
-                          ))}
-                        </div>
-                        <div className="flex flex-wrap gap-2 pt-2">
-                          <button
-                            onClick={() => handleSaveModels(provider.id, false)}
-                            disabled={savingModels}
-                            className="px-3 py-1.5 rounded-md text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-all disabled:opacity-50"
-                          >
-                            {savingModels ? 'Saving...' : '💾 Save'}
-                          </button>
-                          <button
-                            onClick={() => handleSaveModels(provider.id, true)}
-                            disabled={savingModels}
-                            className="px-3 py-1.5 rounded-md text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-50"
-                          >
-                            {savingModels ? 'Applying...' : '🚀 Save & Apply'}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Action buttons */}
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={() => handleDuplicate(provider.id)}
-                        disabled={loadingAction === 'duplicate'}
-                        className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-700/30 border border-slate-600/30 text-slate-300 hover:bg-slate-700/50 hover:text-white transition-all disabled:opacity-50"
-                      >
-                        {loadingAction === 'duplicate' ? 'Duplicating...' : '📋 Duplicate'}
-                      </button>
-                      <button
-                        onClick={() => handleSpeedtest(provider.id)}
-                        disabled={loadingAction === 'speedtest'}
-                        className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-700/30 border border-slate-600/30 text-slate-300 hover:bg-slate-700/50 hover:text-white transition-all disabled:opacity-50"
-                      >
-                        {loadingAction === 'speedtest' ? 'Testing...' : '⚡ Speedtest'}
-                      </button>
-                      <button
-                        onClick={() => handleQuota(provider.id)}
-                        disabled={loadingAction === 'quota'}
-                        className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-700/30 border border-slate-600/30 text-slate-300 hover:bg-slate-700/50 hover:text-white transition-all disabled:opacity-50"
-                      >
-                        {loadingAction === 'quota' ? 'Querying...' : '📊 Quota'}
-                      </button>
-                      <button
-                        onClick={() => handleFetchModels(provider.id)}
-                        disabled={loadingAction === 'models'}
-                        className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-700/30 border border-slate-600/30 text-slate-300 hover:bg-slate-700/50 hover:text-white transition-all disabled:opacity-50"
-                      >
-                        {loadingAction === 'models' ? 'Fetching...' : '🔍 Models'}
-                      </button>
-                    </div>
-
-                    {/* Speedtest result */}
-                    {speedtestResult && (
-                      <div className="mt-2 p-3 rounded-lg bg-slate-900/50 border border-slate-700/30">
-                        <h4 className="text-xs font-semibold text-slate-300 mb-1 flex items-center">
-                          ⚡ Speedtest Result
-                          <button onClick={() => setSpeedtestResult(null)} className="ml-auto text-slate-500 hover:text-slate-300 text-xs">✕</button>
-                        </h4>
-                        <pre className="text-xs text-slate-400 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto">
-                          {speedtestResult.output}
-                        </pre>
-                      </div>
-                    )}
-
-                    {/* Quota result */}
-                    {quotaResult && (
-                      <div className="mt-2 p-3 rounded-lg bg-slate-900/50 border border-slate-700/30">
-                        <h4 className="text-xs font-semibold text-slate-300 mb-1 flex items-center">
-                          📊 Quota Result
-                          <button onClick={() => setQuotaResult(null)} className="ml-auto text-slate-500 hover:text-slate-300 text-xs">✕</button>
-                        </h4>
-                        <pre className="text-xs text-slate-400 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto">
-                          {quotaResult.data ? JSON.stringify(quotaResult.data, null, 2) : quotaResult.output}
-                        </pre>
-                      </div>
-                    )}
-
-                    {/* Models result */}
-                    {modelsResult && (
-                      <div className="mt-2 p-3 rounded-lg bg-slate-900/50 border border-slate-700/30">
-                        <h4 className="text-xs font-semibold text-slate-300 mb-1 flex items-center">
-                          🔍 Available Models
-                          <button onClick={() => setModelsResult(null)} className="ml-auto text-slate-500 hover:text-slate-300 text-xs">✕</button>
-                        </h4>
-                        <pre className="text-xs text-slate-400 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto">
-                          {modelsResult.output}
-                        </pre>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
           </div>
         ))}
       </div>
+
+      {/* Modal Dialog for Provider Detail */}
+      {selectedProvider && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            onClick={closeModal}
+          />
+
+          {/* Modal */}
+          <div className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto glass rounded-2xl border border-purple-500/30 shadow-2xl shadow-purple-500/10">
+            {/* Modal Header */}
+            <div className="sticky top-0 z-10 flex items-center justify-between p-5 border-b border-slate-700/50 bg-slate-900/90 backdrop-blur-sm rounded-t-2xl">
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 rounded-lg bg-purple-500/20 flex items-center justify-center text-lg">
+                  {getProviderIcon(selectedProvider ? (providers.find(p => p.id === selectedProvider)?.name || '') : '')}
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold text-white">
+                    {providers.find(p => p.id === selectedProvider)?.name || 'Provider'}
+                  </h2>
+                  <p className="text-xs text-slate-400 font-mono">{selectedProvider}</p>
+                </div>
+              </div>
+              <button
+                onClick={closeModal}
+                className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/50 transition-all"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 space-y-4">
+              {loadingDetail ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-3 border-purple-500/30 border-t-purple-500 mr-3" />
+                  <span className="text-sm text-slate-400">Loading details...</span>
+                </div>
+              ) : (
+                <>
+                  {/* Health status */}
+                  {providerDetail?.health && (
+                    <div className="flex items-center space-x-3 text-xs">
+                      <span className={`px-2 py-0.5 rounded-full ${
+                        providerDetail.health.is_healthy
+                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                          : 'bg-red-500/10 text-red-400 border border-red-500/20'
+                      }`}>
+                        {providerDetail.health.is_healthy ? '● Healthy' : '● Unhealthy'}
+                      </span>
+                      {providerDetail.health.consecutive_failures > 0 && (
+                        <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                          Failures: {providerDetail.health.consecutive_failures}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Editable Fields Form */}
+                  {fieldGroups.size > 0 && (
+                    <div className="p-4 rounded-xl bg-slate-900/30 border border-slate-700/30 space-y-4">
+                      <h4 className="text-sm font-semibold text-indigo-300 flex items-center">
+                        ⚙️ Settings
+                      </h4>
+
+                      {/* Render fields grouped by category in order */}
+                      {CATEGORY_ORDER.map(cat => {
+                        const groupFields = fieldGroups.get(cat)
+                        if (!groupFields || groupFields.length === 0) return null
+                        const catInfo = CATEGORY_LABELS[cat] || CATEGORY_LABELS.other
+                        return (
+                          <div key={cat} className="space-y-2">
+                            <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center">
+                              <span className="mr-1.5">{catInfo.icon}</span>
+                              {catInfo.title}
+                            </h5>
+                            <div className="space-y-2 pl-1">
+                              {groupFields.map((field: any) => {
+                                const isSensitive =
+                                  field.category === 'api_key' ||
+                                  field.label.toLowerCase().includes('token') ||
+                                  field.label.toLowerCase().includes('key')
+                                const hasOptions = Array.isArray(field.options) && field.options.length > 0
+                                return (
+                                  <div key={field.label} className="flex flex-col gap-1">
+                                    <label className="text-xs text-slate-500 font-mono">{field.label}</label>
+                                    {isSensitive ? (
+                                      <div className="relative">
+                                        <input
+                                          type="password"
+                                          value={modelEdits[field.label] ?? field.value}
+                                          onChange={(e) => setModelEdits(prev => ({ ...prev, [field.label]: e.target.value }))}
+                                          disabled={savingModels}
+                                          className="w-full pl-3 pr-10 py-2 rounded-md bg-slate-800/50 border border-slate-600/30 text-white text-xs focus:outline-none focus:border-indigo-500 disabled:opacity-50 font-mono"
+                                        />
+                                        <button
+                                          type="button"
+                                          onMouseDown={() => {
+                                            const input = document.querySelector(`input[data-field="${field.label}"]`) as HTMLInputElement
+                                            if (input) input.type = 'text'
+                                          }}
+                                          onMouseUp={() => {
+                                            const input = document.querySelector(`input[data-field="${field.label}"]`) as HTMLInputElement
+                                            if (input) input.type = 'password'
+                                          }}
+                                          onMouseLeave={() => {
+                                            const input = document.querySelector(`input[data-field="${field.label}"]`) as HTMLInputElement
+                                            if (input) input.type = 'password'
+                                          }}
+                                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 text-xs"
+                                          title="Hold to reveal"
+                                        >
+                                          👁
+                                        </button>
+                                      </div>
+                                    ) : hasOptions ? (
+                                      <div className="relative">
+                                        <select
+                                          value={modelEdits[field.label] ?? field.value}
+                                          onChange={(e) => setModelEdits(prev => ({ ...prev, [field.label]: e.target.value }))}
+                                          disabled={savingModels}
+                                          className="w-full px-3 py-2 pr-8 rounded-md bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 text-xs focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 disabled:opacity-50 font-mono appearance-none cursor-pointer"
+                                        >
+                                          {field.options.map((opt: string) => (
+                                            <option key={opt} value={opt} className="bg-slate-800 text-white">
+                                              {opt}
+                                            </option>
+                                          ))}
+                                        </select>
+                                        <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-indigo-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                        </svg>
+                                      </div>
+                                    ) : (
+                                      <input
+                                        type="text"
+                                        data-field={field.label}
+                                        value={modelEdits[field.label] ?? field.value}
+                                        onChange={(e) => setModelEdits(prev => ({ ...prev, [field.label]: e.target.value }))}
+                                        disabled={savingModels}
+                                        className="w-full px-3 py-2 rounded-md bg-slate-800/50 border border-slate-600/30 text-white text-xs focus:outline-none focus:border-indigo-500 disabled:opacity-50 font-mono"
+                                      />
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )
+                      })}
+
+                      <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-700/30">
+                        <button
+                          onClick={() => handleSaveModels(selectedProvider!, false)}
+                          disabled={savingModels}
+                          className="px-4 py-2 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-all disabled:opacity-50"
+                        >
+                          {savingModels ? 'Saving...' : '💾 Save'}
+                        </button>
+                        <button
+                          onClick={() => handleSaveModels(selectedProvider!, true)}
+                          disabled={savingModels}
+                          className="px-4 py-2 rounded-lg text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-50"
+                        >
+                          {savingModels ? 'Applying...' : '🚀 Save & Apply'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action buttons */}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => handleDuplicate(selectedProvider!)}
+                      disabled={loadingAction === 'duplicate'}
+                      className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-700/30 border border-slate-600/30 text-slate-300 hover:bg-slate-700/50 hover:text-white transition-all disabled:opacity-50"
+                    >
+                      {loadingAction === 'duplicate' ? 'Duplicating...' : '📋 Duplicate'}
+                    </button>
+                    <button
+                      onClick={() => handleSpeedtest(selectedProvider!)}
+                      disabled={loadingAction === 'speedtest'}
+                      className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-700/30 border border-slate-600/30 text-slate-300 hover:bg-slate-700/50 hover:text-white transition-all disabled:opacity-50"
+                    >
+                      {loadingAction === 'speedtest' ? 'Testing...' : '⚡ Speedtest'}
+                    </button>
+                    <button
+                      onClick={() => handleQuota(selectedProvider!)}
+                      disabled={loadingAction === 'quota'}
+                      className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-700/30 border border-slate-600/30 text-slate-300 hover:bg-slate-700/50 hover:text-white transition-all disabled:opacity-50"
+                    >
+                      {loadingAction === 'quota' ? 'Querying...' : '📊 Quota'}
+                    </button>
+                    <button
+                      onClick={() => handleFetchModels(selectedProvider!)}
+                      disabled={loadingAction === 'models'}
+                      className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-700/30 border border-slate-600/30 text-slate-300 hover:bg-slate-700/50 hover:text-white transition-all disabled:opacity-50"
+                    >
+                      {loadingAction === 'models' ? 'Fetching...' : '🔍 Models'}
+                    </button>
+                  </div>
+
+                  {/* Speedtest result */}
+                  {speedtestResult && (
+                    <div className="mt-2 p-3 rounded-lg bg-slate-900/50 border border-slate-700/30">
+                      <h4 className="text-xs font-semibold text-slate-300 mb-1 flex items-center">
+                        ⚡ Speedtest Result
+                        <button onClick={() => setSpeedtestResult(null)} className="ml-auto text-slate-500 hover:text-slate-300 text-xs">✕</button>
+                      </h4>
+                      <pre className="text-xs text-slate-400 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto">
+                        {speedtestResult.output}
+                      </pre>
+                    </div>
+                  )}
+
+                  {/* Quota result */}
+                  {quotaResult && (
+                    <div className="mt-2 p-3 rounded-lg bg-slate-900/50 border border-slate-700/30">
+                      <h4 className="text-xs font-semibold text-slate-300 mb-1 flex items-center">
+                        📊 Quota Result
+                        <button onClick={() => setQuotaResult(null)} className="ml-auto text-slate-500 hover:text-slate-300 text-xs">✕</button>
+                      </h4>
+                      <pre className="text-xs text-slate-400 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto">
+                        {quotaResult.data ? JSON.stringify(quotaResult.data, null, 2) : quotaResult.output}
+                      </pre>
+                    </div>
+                  )}
+
+                  {/* Models result */}
+                  {modelsResult && (
+                    <div className="mt-2 p-3 rounded-lg bg-slate-900/50 border border-slate-700/30">
+                      <h4 className="text-xs font-semibold text-slate-300 mb-1 flex items-center">
+                        🔍 Available Models
+                        <button onClick={() => setModelsResult(null)} className="ml-auto text-slate-500 hover:text-slate-300 text-xs">✕</button>
+                      </h4>
+                      <pre className="text-xs text-slate-400 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto">
+                        {modelsResult.output}
+                      </pre>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {filtered.length === 0 && !loading && (
         <div className="text-center py-20">

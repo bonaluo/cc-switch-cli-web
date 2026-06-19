@@ -189,27 +189,63 @@ def extract_api_url(settings_config: Dict[str, Any]) -> str:
 
 
 def extract_model_fields(settings_config: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract editable model-like string fields from settings config."""
+    """Extract editable string fields from settings config, with category for sorting."""
     fields: List[Dict[str, Any]] = []
+
+    # Category sort order for grouping
+    CATEGORY_ORDER = {
+        "base_url": 0,
+        "api_key": 1,
+        "api_mode": 2,
+        "model": 3,
+        "other": 9,
+    }
+
+    def classify(key_lower: str, joined: str) -> str:
+        """Determine category of a field for grouping/sorting."""
+        for kw in ("base_url", "baseurl", "base"):
+            if kw in key_lower or kw in joined:
+                return "base_url"
+        for kw in ("api_key", "apikey", "auth_token", "token", "auth"):
+            if kw in key_lower or kw in joined:
+                return "api_key"
+        # Strict API mode matching: only exact "api" or "api_mode" keys
+        if key_lower == "api" or key_lower == "api_mode" or key_lower == "wire_api":
+            return "api_mode"
+        if "model" in key_lower or "model" in joined:
+            return "model"
+        return "other"
 
     def walk(value: Any, path: List[str]):
         if isinstance(value, dict):
             for key, child in value.items():
+                # Skip legacy API mode keys that should be managed via meta JSON
+                if path == [] and key in ("api", "api_mode"):
+                    continue
                 walk(child, path + [key])
         elif isinstance(value, list):
             for index, child in enumerate(value):
                 walk(child, path + [str(index)])
         elif isinstance(value, str):
             key = path[-1] if path else ""
+            kl = key.lower()
             joined = ".".join(path).lower()
-            if "model" in key.lower() or joined.endswith(".api"):
+            # Match fields relevant to provider config: model, key, url, base, token, auth, api, mode
+            matched = any(kw in kl for kw in (
+                "model", "key", "url", "base", "token", "auth", "api", "mode"
+            ))
+            if matched:
+                category = classify(kl, joined)
                 fields.append({
                     "path": path,
                     "label": ".".join(path),
                     "value": value,
+                    "category": category,
                 })
 
     walk(settings_config, [])
+    # Sort by category order, then by label
+    fields.sort(key=lambda f: (CATEGORY_ORDER.get(f["category"], 9), f["label"].lower()))
     return fields
 
 
@@ -225,6 +261,10 @@ def set_config_value(config: Any, path: List[str], value: str) -> None:
             target = target[int(part)]
         elif isinstance(target, dict) and part in target:
             target = target[part]
+        elif isinstance(target, dict):
+            # Allow creating new nested keys
+            target[part] = {}
+            target = target[part]
         else:
             raise HTTPException(status_code=400, detail=f"Invalid model field path: {'.'.join(path)}")
     last = path[-1]
@@ -234,9 +274,7 @@ def set_config_value(config: Any, path: List[str], value: str) -> None:
         if not isinstance(target[int(last)], str):
             raise HTTPException(status_code=400, detail=f"Model field is not editable: {'.'.join(path)}")
         target[int(last)] = value
-    elif isinstance(target, dict) and last in target:
-        if not isinstance(target[last], str):
-            raise HTTPException(status_code=400, detail=f"Model field is not editable: {'.'.join(path)}")
+    elif isinstance(target, dict):
         target[last] = value
     else:
         raise HTTPException(status_code=400, detail=f"Invalid model field path: {'.'.join(path)}")
@@ -378,6 +416,45 @@ def get_provider_detail(provider_id: str):
     api_url = extract_api_url(settings)
     model_fields = extract_model_fields(settings)
 
+    # API Format from meta JSON (settings_config may have stale api_mode/api keys to ignore)
+    meta_json = json.loads(row["meta"]) if row["meta"] else {}
+    api_format = meta_json.get("apiFormat", "")
+    if not api_format:
+        # Derive default from app_type
+        app_type = row["app_type"]
+        if app_type == "claude":
+            api_format = "anthropic"
+        elif app_type == "openclaw":
+            api_format = "openai_chat"
+        elif app_type == "hermes":
+            api_format = "chat_completions"
+        else:
+            api_format = "unknown"
+    # Insert as api_mode category so it sorts correctly
+    model_fields.insert(0, {
+        "path": ["_api_format"],
+        "label": "API Format",
+        "value": api_format,
+        "category": "api_mode",
+        "options": ["anthropic", "openai_chat"],
+    })
+
+    # Meta fields: name and notes are stored as provider columns, not in settings_config
+    meta_fields = [
+        {
+            "path": ["_name"],
+            "label": "Name",
+            "value": row["name"] or "",
+            "category": "name",
+        },
+        {
+            "path": ["_notes"],
+            "label": "Notes",
+            "value": row["notes"] or "",
+            "category": "notes",
+        },
+    ]
+
     # Health info from DB (if any)
     health = None
     try:
@@ -413,6 +490,7 @@ def get_provider_detail(provider_id: str):
         },
         "health": health,
         "model_fields": model_fields,
+        "meta_fields": meta_fields,
     }
 
 
@@ -425,18 +503,57 @@ def update_provider_models(provider_id: str, payload: ProviderModelsUpdate = Bod
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Provider config is not valid JSON")
 
+    meta_updates: Dict[str, str] = {}
+    meta_json_updates: Dict[str, Any] = {}
+    config_fields = []
     for field in payload.fields:
-        set_config_value(settings, field.path, field.value)
+        path_str = field.path[0] if field.path else ""
+        if path_str == "_name":
+            meta_updates["name"] = field.value
+        elif path_str == "_notes":
+            meta_updates["notes"] = field.value
+        elif path_str == "_api_format":
+            meta_json_updates["apiFormat"] = field.value
+        else:
+            config_fields.append(field)
+            set_config_value(settings, field.path, field.value)
 
-    serialized = serialize_config(settings)
-    try:
-        with open_provider_db(readonly=False) as conn:
-            conn.execute(
-                "UPDATE providers SET settings_config = ? WHERE id = ?",
-                (serialized, provider_id)
-            )
-    except sqlite3.Error as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update provider DB: {e}")
+    # Update provider row for meta fields (name, notes)
+    if meta_updates:
+        try:
+            with open_provider_db(readonly=False) as conn:
+                for col, val in meta_updates.items():
+                    conn.execute(
+                        f"UPDATE providers SET {col} = ? WHERE id = ?",
+                        (val, provider_id)
+                    )
+        except sqlite3.Error as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update provider meta: {e}")
+
+    # Update meta JSON for apiFormat
+    if meta_json_updates:
+        try:
+            # Re-read meta to be safe (row was loaded earlier)
+            with open_provider_db(readonly=True) as _conn:
+                fresh = _conn.execute("SELECT meta FROM providers WHERE id = ?", (provider_id,)).fetchone()
+                current_meta = json.loads(fresh[0]) if fresh and fresh[0] else {}
+            current_meta.update(meta_json_updates)
+            serialized_meta = json.dumps(current_meta, ensure_ascii=False)
+            with open_provider_db(readonly=False) as conn:
+                conn.execute("UPDATE providers SET meta = ? WHERE id = ?", (serialized_meta, provider_id))
+        except (sqlite3.Error, json.JSONDecodeError) as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update provider meta JSON: {e}")
+
+    if config_fields:
+        serialized = serialize_config(settings)
+        try:
+            with open_provider_db(readonly=False) as conn:
+                conn.execute(
+                    "UPDATE providers SET settings_config = ? WHERE id = ?",
+                    (serialized, provider_id)
+                )
+        except sqlite3.Error as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update provider DB: {e}")
 
     applied = False
     if payload.apply:
