@@ -121,6 +121,29 @@ function SessionList() {
     }
   }
 
+  // Safe clipboard copy with fallback for HTTP/non-secure contexts
+  const copyToClipboard = async (text: string) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text)
+        return true
+      }
+      // Fallback: use a temporary textarea to copy text
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      const success = document.execCommand('copy')
+      document.body.removeChild(textarea)
+      return success
+    } catch (err) {
+      console.error('Failed to copy to clipboard:', err)
+      return false
+    }
+  }
+
   const filtered = sessions.filter(s =>
     s.title?.toLowerCase().includes(searchTerm.toLowerCase()) ||
     s.summary?.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -174,7 +197,7 @@ function SessionList() {
               {s.resumeCommand}
             </code>
             <button
-              onClick={() => navigator.clipboard.writeText(s.resumeCommand)}
+              onClick={() => copyToClipboard(s.resumeCommand)}
               className="text-xs px-2 py-1 rounded bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30 transition-colors"
             >
               Copy resume command
