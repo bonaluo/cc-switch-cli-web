@@ -71,7 +71,10 @@ const CATEGORY_LABELS: Record<string, { title: string; icon: string }> = {
 
 function groupFieldsByCategory(fields: any[]): Map<string, any[]> {
   const groups = new Map<string, any[]>()
+  const seen = new Set<string>()
   for (const f of fields) {
+    if (seen.has(f.label)) continue
+    seen.add(f.label)
     const cat = f.category || 'other'
     if (!groups.has(cat)) groups.set(cat, [])
     groups.get(cat)!.push(f)

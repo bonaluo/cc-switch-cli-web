@@ -209,9 +209,6 @@ def extract_model_fields(settings_config: Dict[str, Any]) -> List[Dict[str, Any]
         for kw in ("api_key", "apikey", "auth_token", "token", "auth"):
             if kw in key_lower or kw in joined:
                 return "api_key"
-        # Strict API mode matching: only exact "api" or "api_mode" keys
-        if key_lower == "api" or key_lower == "api_mode" or key_lower == "wire_api":
-            return "api_mode"
         if "model" in key_lower or "model" in joined:
             return "model"
         return "other"
@@ -219,8 +216,9 @@ def extract_model_fields(settings_config: Dict[str, Any]) -> List[Dict[str, Any]
     def walk(value: Any, path: List[str]):
         if isinstance(value, dict):
             for key, child in value.items():
-                # Skip legacy API mode keys that should be managed via meta JSON
-                if path == [] and key in ("api", "api_mode"):
+                # Skip legacy API mode keys at any level — they are managed
+                # via meta JSON (apiFormat) and exposed as a separate _api_format field.
+                if key in ("api", "api_mode", "wire_api"):
                     continue
                 walk(child, path + [key])
         elif isinstance(value, list):
@@ -230,9 +228,10 @@ def extract_model_fields(settings_config: Dict[str, Any]) -> List[Dict[str, Any]
             key = path[-1] if path else ""
             kl = key.lower()
             joined = ".".join(path).lower()
-            # Match fields relevant to provider config: model, key, url, base, token, auth, api, mode
+            # Match fields relevant to provider config: model, key, url, base, token, auth, mode
+            # (api/api_mode/wire_api are filtered above)
             matched = any(kw in kl for kw in (
-                "model", "key", "url", "base", "token", "auth", "api", "mode"
+                "model", "key", "url", "base", "token", "auth", "mode"
             ))
             if matched:
                 category = classify(kl, joined)
