@@ -11,6 +11,7 @@ export interface Provider {
   name: string
   api_url: string
   active: boolean
+  app_type: string
   notes: string
 }
 

@@ -5,6 +5,7 @@ export interface Provider {
   name: string
   api_url: string
   active: boolean
+  app_type: string
   notes: string
 }
 
@@ -84,8 +85,30 @@ function groupFieldsByCategory(fields: any[]): Map<string, any[]> {
 
 const CATEGORY_ORDER = ['name', 'notes', 'base_url', 'api_key', 'api_mode', 'model', 'other']
 
+const APP_TYPE_META: Record<string, { label: string; icon: string; color: string }> = {
+  claude: { label: 'Claude', icon: '🎭', color: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  codex: { label: 'Codex', icon: '🧠', color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+  gemini: { label: 'Gemini', icon: '♊', color: 'bg-blue-500/15 text-blue-300 border-blue-500/30' },
+  opencode: { label: 'OpenCode', icon: '💻', color: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' },
+  openclaw: { label: 'OpenClaw', icon: '🦅', color: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
+  hermes: { label: 'Hermes', icon: '⚡', color: 'bg-violet-500/15 text-violet-300 border-violet-500/30' },
+}
+
+function normalizeAppType(raw: string): string {
+  const v = (raw || '').toLowerCase().trim()
+  if (v === 'open-code') return 'opencode'
+  if (v === 'open-claw') return 'openclaw'
+  return v
+}
+
+function getAppTypeMeta(raw: string) {
+  const key = normalizeAppType(raw)
+  return APP_TYPE_META[key] || { label: key || 'unknown', icon: '🔌', color: 'bg-slate-500/15 text-slate-300 border-slate-500/30' }
+}
+
 function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListProps) {
   const [searchTerm, setSearchTerm] = useState('')
+  const [appTypeFilter, setAppTypeFilter] = useState<string>('all')
   const [switchingId, setSwitchingId] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null)
   const [providerDetail, setProviderDetail] = useState<ProviderDetailData | null>(null)
@@ -114,11 +137,15 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
     setModelEdits(edits)
   }, [providerDetail?.meta_fields, providerDetail?.model_fields])
 
-  const filtered = providers.filter(p =>
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.api_url.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.notes.toLowerCase().includes(searchTerm.toLowerCase())
-  )
+  const filtered = providers.filter(p => {
+    const matchesSearch = !searchTerm ||
+      p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      p.api_url.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      p.notes.toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesAppType = appTypeFilter === 'all' ||
+      normalizeAppType(p.app_type) === appTypeFilter
+    return matchesSearch && matchesAppType
+  })
 
   const sorted = [...filtered].sort((a, b) => {
     if (a.active && !b.active) return -1
@@ -275,6 +302,17 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
   ]
   const fieldGroups = groupFieldsByCategory(allFields)
 
+  // Build a "source" lookup so the UI can mark meta-stored fields distinctly.
+  // The server's model_fields list tags each entry with `source` ("settings_config"
+  // or "meta"); meta_fields (name/notes) are always provider-column edits.
+  const fieldSource: Record<string, 'settings_config' | 'meta' | 'column'> = {}
+  for (const f of providerDetail?.model_fields || []) {
+    fieldSource[f.label] = (f.source === 'meta' ? 'meta' : 'settings_config')
+  }
+  for (const f of providerDetail?.meta_fields || []) {
+    fieldSource[f.label] = 'column'
+  }
+
   return (
     <div className="space-y-6">
       {/* Stats Bar */}
@@ -295,6 +333,43 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
           <div className="text-3xl font-bold text-white">{filtered.length}</div>
           <div className="text-sm text-slate-400 mt-1">Filtered</div>
         </div>
+      </div>
+
+      {/* App Type Filter Tabs */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-slate-500 mr-1">Filter:</span>
+        {(() => {
+          const counts: Record<string, number> = { all: providers.length }
+          for (const p of providers) {
+            const key = normalizeAppType(p.app_type) || 'unknown'
+            counts[key] = (counts[key] || 0) + 1
+          }
+          const keys = ['all', ...Object.keys(APP_TYPE_META).filter(k => counts[k])]
+          return keys.map(k => {
+            const isActive = appTypeFilter === k
+            const meta = k === 'all'
+              ? { label: 'All', icon: '🗂️', color: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' }
+              : APP_TYPE_META[k]
+            const count = counts[k] || 0
+            return (
+              <button
+                key={k}
+                onClick={() => setAppTypeFilter(k)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all ${
+                  isActive
+                    ? `${meta.color} shadow-sm`
+                    : 'bg-slate-800/30 text-slate-400 border-slate-700/50 hover:bg-slate-700/40 hover:text-slate-200'
+                }`}
+              >
+                <span>{meta.icon}</span>
+                <span>{meta.label}</span>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] ${isActive ? 'bg-black/20' : 'bg-slate-700/50'}`}>
+                  {count}
+                </span>
+              </button>
+            )
+          })
+        })()}
       </div>
 
       {/* Toolbar */}
@@ -392,12 +467,23 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
                       )}
                     </div>
                   </div>
-                  {provider.active && (
-                    <div className="flex items-center text-xs font-medium text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-md">
-                      <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />
-                      Active
-                    </div>
-                  )}
+                  <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+                    {provider.app_type && (() => {
+                      const meta = getAppTypeMeta(provider.app_type)
+                      return (
+                        <span className={`flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-md border ${meta.color}`}>
+                          <span>{meta.icon}</span>
+                          <span>{meta.label}</span>
+                        </span>
+                      )
+                    })()}
+                    {provider.active && (
+                      <div className="flex items-center text-xs font-medium text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-md">
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />
+                        Active
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* ID */}
@@ -537,7 +623,14 @@ function ProviderList({ providers, loading, onSwitch, onRefresh }: ProviderListP
                                 const hasOptions = Array.isArray(field.options) && field.options.length > 0
                                 return (
                                   <div key={field.label} className="flex flex-col gap-1">
-                                    <label className="text-xs text-slate-500 font-mono">{field.label}</label>
+                                    <label className="text-xs text-slate-500 font-mono flex items-center gap-1.5">
+                                      <span>{field.label}</span>
+                                      {fieldSource[field.label] === 'meta' && (
+                                        <span className="px-1.5 py-0.5 rounded text-[9px] font-sans font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                                          meta
+                                        </span>
+                                      )}
+                                    </label>
                                     {isSensitive ? (
                                       <div className="relative">
                                         <input

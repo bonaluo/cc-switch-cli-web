@@ -7,7 +7,7 @@ import json
 import os
 import re
 import sqlite3
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Set, Any
 from pydantic import BaseModel
 
 
@@ -30,6 +30,7 @@ class Provider(BaseModel):
     name: str
     api_url: str
     active: bool = False
+    app_type: str = ""
     notes: str = ""
 
 
@@ -138,6 +139,16 @@ def get_provider_notes() -> Dict[str, str]:
         return {}
 
 
+def get_provider_app_types() -> Dict[str, str]:
+    """Read provider app_type from the local cc-switch database."""
+    try:
+        with open_provider_db(readonly=True) as conn:
+            rows = conn.execute("SELECT id, app_type FROM providers")
+            return {row[0]: row[1] for row in rows}
+    except sqlite3.Error:
+        return {}
+
+
 def get_db_path() -> str:
     """Return the local cc-switch database path."""
     return os.path.expanduser("~/.cc-switch/cc-switch.db")
@@ -155,21 +166,41 @@ def open_provider_db(readonly: bool = True) -> sqlite3.Connection:
     return conn
 
 
-def load_provider_row(provider_id: str) -> Dict[str, Any]:
-    """Load a provider row from the database."""
+def load_provider_row(provider_id: str, app_type: Optional[str] = None) -> Dict[str, Any]:
+    """Load a provider row from the database.
+
+    The ``(id, app_type)`` pair is the primary key, so the same ``id`` can have
+    multiple rows (one per app_type). If ``app_type`` is given, return that row;
+    otherwise return the first row by app_type order.
+    """
     with open_provider_db(readonly=True) as conn:
         conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """
-            SELECT id, app_type, name, settings_config, website_url, category, created_at,
-                   sort_index, notes, icon, icon_color, meta, is_current,
-                   in_failover_queue, cost_multiplier, limit_daily_usd,
-                   limit_monthly_usd, provider_type
-            FROM providers
-            WHERE id = ?
-            """,
-            (provider_id,)
-        ).fetchone()
+        if app_type:
+            row = conn.execute(
+                """
+                SELECT id, app_type, name, settings_config, website_url, category, created_at,
+                       sort_index, notes, icon, icon_color, meta, is_current,
+                       in_failover_queue, cost_multiplier, limit_daily_usd,
+                       limit_monthly_usd, provider_type
+                FROM providers
+                WHERE id = ? AND app_type = ?
+                """,
+                (provider_id, app_type),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT id, app_type, name, settings_config, website_url, category, created_at,
+                       sort_index, notes, icon, icon_color, meta, is_current,
+                       in_failover_queue, cost_multiplier, limit_daily_usd,
+                       limit_monthly_usd, provider_type
+                FROM providers
+                WHERE id = ?
+                ORDER BY app_type
+                LIMIT 1
+                """,
+                (provider_id,),
+            ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
     return dict(row)
@@ -188,63 +219,228 @@ def extract_api_url(settings_config: Dict[str, Any]) -> str:
     return ""
 
 
-def extract_model_fields(settings_config: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract editable string fields from settings config, with category for sorting."""
+# Field schema per app type: the **complete** set of editable fields a provider of
+# that app type should expose in the detail panel. Each entry's ``path`` is a
+# dotted JSON path in either ``settings_config`` (default) or ``meta`` (when
+# ``source="meta"`` is set).
+#
+# Sources: farion1231/cc-switch provider presets and DB inspection of every
+# app_type — mirrored here so the web UI always shows the same field set for
+# every provider of a given app type, even if a specific provider has not yet
+# been saved with that field. Fields stored in the DB but not in this schema
+# (e.g. cc-switch runtime-derivation byproducts like
+# ``ANTHROPIC_DEFAULT_*_MODEL_NAME``) are intentionally hidden so the panel
+# matches the canonical set.
+#
+# Each field has:
+#   - path: list of JSON path segments (e.g. ["env", "ANTHROPIC_BASE_URL"])
+#   - category: for grouping in the UI (base_url / api_key / api_mode /
+#               model / other)
+#   - source (optional): "settings_config" (default) or "meta"
+APP_TYPE_FIELD_SCHEMA: Dict[str, List[Dict[str, Any]]] = {
+    # Claude (Anthropic env map). The 12 env keys mirror exactly what
+    # cc-switch's ClaudeFormFields.tsx exposes:
+    #   - 7 base/model keys: BASE_URL / AUTH_TOKEN / API_KEY / MODEL /
+    #     DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL
+    #   - 4 display-name keys: DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL_NAME
+    #     (separate user-editable fields for the model name shown in Claude Code
+    #     UI; the proxy routes the *real* upstream model separately)
+    "claude": [
+        {"path": ["env", "ANTHROPIC_BASE_URL"], "category": "base_url"},
+        {"path": ["env", "ANTHROPIC_AUTH_TOKEN"], "category": "api_key"},
+        {"path": ["env", "ANTHROPIC_API_KEY"], "category": "api_key"},
+        {"path": ["env", "ANTHROPIC_MODEL"], "category": "model"},
+        # Model role ordering matches cc-switch ClaudeFormFields.tsx:
+        # Sonnet → Opus → Fable → Haiku; each role exposes MODEL then MODEL_NAME.
+        {"path": ["env", "ANTHROPIC_DEFAULT_SONNET_MODEL"], "category": "model"},
+        {"path": ["env", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"], "category": "model"},
+        {"path": ["env", "ANTHROPIC_DEFAULT_OPUS_MODEL"], "category": "model"},
+        {"path": ["env", "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"], "category": "model"},
+        {"path": ["env", "ANTHROPIC_DEFAULT_FABLE_MODEL"], "category": "model"},
+        {"path": ["env", "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"], "category": "model"},
+        {"path": ["env", "ANTHROPIC_DEFAULT_HAIKU_MODEL"], "category": "model"},
+        {"path": ["env", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"], "category": "model"},
+    ],
+    # Codex: { auth: {OPENAI_API_KEY}, config: "<TOML>", modelCatalog: {models:[]} }
+    "codex": [
+        {"path": ["auth", "OPENAI_API_KEY"], "category": "api_key"},
+        {"path": ["config"], "category": "other"},
+        {"path": ["modelCatalog"], "category": "model"},
+    ],
+    # Gemini: { env: {GOOGLE_GEMINI_BASE_URL, GEMINI_API_KEY/GOOGLE_API_KEY, GEMINI_MODEL} }
+    "gemini": [
+        {"path": ["env", "GOOGLE_GEMINI_BASE_URL"], "category": "base_url"},
+        {"path": ["env", "GEMINI_API_KEY"], "category": "api_key"},
+        {"path": ["env", "GOOGLE_API_KEY"], "category": "api_key"},
+        {"path": ["env", "GEMINI_MODEL"], "category": "model"},
+    ],
+    # OpenCode: OpenCodeProviderConfig = {npm, name, options:{baseURL,apiKey,headers,...}, models:{<id>:{name,...}}}
+    "opencode": [
+        {"path": ["npm"], "category": "other"},
+        {"path": ["name"], "category": "name"},
+        {"path": ["options", "baseURL"], "category": "base_url"},
+        {"path": ["options", "apiKey"], "category": "api_key"},
+        {"path": ["models"], "category": "model"},
+    ],
+    "open-code": [
+        {"path": ["npm"], "category": "other"},
+        {"path": ["name"], "category": "name"},
+        {"path": ["options", "baseURL"], "category": "base_url"},
+        {"path": ["options", "apiKey"], "category": "api_key"},
+        {"path": ["models"], "category": "model"},
+    ],
+    # OpenClaw: flat camelCase {baseUrl, apiKey, api, models[], headers, ...}
+    "openclaw": [
+        {"path": ["baseUrl"], "category": "base_url"},
+        {"path": ["apiKey"], "category": "api_key"},
+        {"path": ["api"], "category": "api_mode"},
+        {"path": ["models"], "category": "model"},
+    ],
+    "open-claw": [
+        {"path": ["baseUrl"], "category": "base_url"},
+        {"path": ["apiKey"], "category": "api_key"},
+        {"path": ["api"], "category": "api_mode"},
+        {"path": ["models"], "category": "model"},
+    ],
+    # Hermes: flat snake_case {base_url, api_key, api_mode, model, name, default, provider}
+    "hermes": [
+        {"path": ["base_url"], "category": "base_url"},
+        {"path": ["api_key"], "category": "api_key"},
+        {"path": ["api_mode"], "category": "api_mode"},
+        {"path": ["model"], "category": "model"},
+        {"path": ["name"], "category": "name"},
+        {"path": ["default"], "category": "model"},
+        {"path": ["provider"], "category": "model"},
+    ],
+}
+
+# Meta-field schema per app type. The ProviderMeta JSON is stored separately
+# from settings_config; only fields that are user-relevant and app_type-aware
+# are exposed here. Common ones (api_format, cost_multiplier, ...) live below
+# for all app_types; some app types have additional fields.
+_META_COMMON: List[Dict[str, Any]] = [
+    {"path": ["apiFormat"], "category": "api_mode", "label": "API Format"},
+    {"path": ["costMultiplier"], "category": "other", "label": "Cost Multiplier"},
+    {"path": ["limitDailyUsd"], "category": "other", "label": "Daily Limit (USD)"},
+    {"path": ["limitMonthlyUsd"], "category": "other", "label": "Monthly Limit (USD)"},
+    {"path": ["customUserAgent"], "category": "other", "label": "Custom User-Agent"},
+    {"path": ["endpointAutoSelect"], "category": "other", "label": "Auto-Select Endpoint"},
+]
+
+_META_CLAUDE: List[Dict[str, Any]] = _META_COMMON + [
+    {"path": ["apiKeyField"], "category": "other", "label": "API Key Field"},
+    {"path": ["isFullUrl"], "category": "other", "label": "Use Full URL"},
+    {"path": ["providerType"], "category": "other", "label": "Provider Type"},
+]
+
+_META_CODEX: List[Dict[str, Any]] = _META_COMMON + [
+    {"path": ["codexFastMode"], "category": "other", "label": "Codex Fast Mode"},
+]
+
+APP_TYPE_META_SCHEMA: Dict[str, List[Dict[str, Any]]] = {
+    "claude": _META_CLAUDE,
+    "claude-desktop": _META_CLAUDE,
+    "codex": _META_CODEX,
+    "gemini": _META_COMMON,
+    "opencode": _META_COMMON,
+    "open-code": _META_COMMON,
+    "openclaw": _META_COMMON,
+    "open-claw": _META_COMMON,
+    "hermes": _META_COMMON,
+}
+
+# Category sort order for grouping in the UI.
+CATEGORY_ORDER = {
+    "base_url": 0,
+    "api_key": 1,
+    "api_mode": 2,
+    "model": 3,
+    "name": 4,
+    "notes": 5,
+    "other": 9,
+}
+
+
+def _read_path(root: Any, path: List[str]) -> Any:
+    """Read a value at the dotted path from a JSON-compatible object. Returns
+    ``None`` if any segment is missing."""
+    cur = root
+    for segment in path:
+        if isinstance(cur, dict):
+            if segment not in cur:
+                return None
+            cur = cur[segment]
+        elif isinstance(cur, list):
+            try:
+                idx = int(segment)
+            except ValueError:
+                return None
+            if idx < 0 or idx >= len(cur):
+                return None
+            cur = cur[idx]
+        else:
+            return None
+    return cur
+
+
+def _stringify_field_value(value: Any) -> str:
+    """Coerce a JSON value to a display string for the detail panel."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def extract_model_fields(
+    settings_config: Dict[str, Any],
+    app_type: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Return the canonical field set for a provider of ``app_type``.
+
+    Field set is **schema-driven** (no auto-walk of stored JSON) so every
+    provider of the same app type exposes the same field set in the UI. The
+    provider's stored ``settings_config`` and ``meta`` are used purely as the
+    source of values; missing values render as empty strings.
+    """
     fields: List[Dict[str, Any]] = []
+    seen_paths: Set[Tuple[str, ...]] = set()
 
-    # Category sort order for grouping
-    CATEGORY_ORDER = {
-        "base_url": 0,
-        "api_key": 1,
-        "api_mode": 2,
-        "model": 3,
-        "other": 9,
-    }
+    for entry in APP_TYPE_FIELD_SCHEMA.get(app_type or "", []):
+        path = tuple(entry["path"])
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        value = _read_path(settings_config, list(path))
+        fields.append({
+            "path": list(path),
+            "label": ".".join(path),
+            "value": _stringify_field_value(value),
+            "category": entry.get("category") or "other",
+            "source": "settings_config",
+        })
 
-    def classify(key_lower: str, joined: str) -> str:
-        """Determine category of a field for grouping/sorting."""
-        for kw in ("base_url", "baseurl", "base"):
-            if kw in key_lower or kw in joined:
-                return "base_url"
-        for kw in ("api_key", "apikey", "auth_token", "token", "auth"):
-            if kw in key_lower or kw in joined:
-                return "api_key"
-        if "model" in key_lower or "model" in joined:
-            return "model"
-        return "other"
+    if meta is not None:
+        for entry in APP_TYPE_META_SCHEMA.get(app_type or "", []):
+            path = tuple(entry["path"])
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            value = _read_path(meta, list(path))
+            fields.append({
+                "path": list(path),
+                "label": entry.get("label") or ".".join(path),
+                "value": _stringify_field_value(value),
+                "category": entry.get("category") or "other",
+                "source": "meta",
+            })
 
-    def walk(value: Any, path: List[str]):
-        if isinstance(value, dict):
-            for key, child in value.items():
-                # Skip legacy API mode keys at any level — they are managed
-                # via meta JSON (apiFormat) and exposed as a separate _api_format field.
-                if key in ("api", "api_mode", "wire_api"):
-                    continue
-                walk(child, path + [key])
-        elif isinstance(value, list):
-            for index, child in enumerate(value):
-                walk(child, path + [str(index)])
-        elif isinstance(value, str):
-            key = path[-1] if path else ""
-            kl = key.lower()
-            joined = ".".join(path).lower()
-            # Match fields relevant to provider config: model, key, url, base, token, auth, mode
-            # (api/api_mode/wire_api are filtered above)
-            matched = any(kw in kl for kw in (
-                "model", "key", "url", "base", "token", "auth", "mode"
-            ))
-            if matched:
-                category = classify(kl, joined)
-                fields.append({
-                    "path": path,
-                    "label": ".".join(path),
-                    "value": value,
-                    "category": category,
-                })
-
-    walk(settings_config, [])
-    # Sort by category order, then by label
-    fields.sort(key=lambda f: (CATEGORY_ORDER.get(f["category"], 9), f["label"].lower()))
+    # Preserve schema-defined order rather than re-sorting by label. The schema
+    # already places related fields next to each other (e.g. MODEL + MODEL_NAME
+    # per role) and the category ordering matches CATEGORY_ORDER via insertion.
     return fields
 
 
@@ -291,6 +487,7 @@ def serialize_config(config: Dict[str, Any]) -> str:
 def parse_provider_list(stdout: str) -> List[Provider]:
     """Parse cc-switch provider list output."""
     provider_notes = get_provider_notes()
+    provider_app_types = get_provider_app_types()
     providers = []
     lines = stdout.strip().split('\n')
     for line in lines[2:]:
@@ -313,6 +510,7 @@ def parse_provider_list(stdout: str) -> List[Provider]:
                 name=name,
                 api_url=api_url,
                 active=active,
+                app_type=provider_app_types.get(provider_id, ""),
                 notes=provider_notes.get(provider_id, "")
             ))
     return providers
@@ -398,10 +596,10 @@ def get_providers():
 
 
 @app.get("/api/providers/{provider_id}")
-def get_provider_detail(provider_id: str):
+def get_provider_detail(provider_id: str, app_type: Optional[str] = None):
     """Get detailed info about a provider (health, config) from DB."""
     try:
-        row = load_provider_row(provider_id)
+        row = load_provider_row(provider_id, app_type)
     except HTTPException:
         # Fallback to provider list
         plist_stdout, _, _ = run_cc_switch(["provider", "list"])
@@ -413,30 +611,64 @@ def get_provider_detail(provider_id: str):
 
     settings = json.loads(row["settings_config"]) if row["settings_config"] else {}
     api_url = extract_api_url(settings)
-    model_fields = extract_model_fields(settings)
+    app_type = row["app_type"]
+    meta_json = json.loads(row["meta"]) if row["meta"] else {}
+    model_fields = extract_model_fields(settings, app_type, meta_json)
+
+    # API Format options per app type — only the formats the app actually supports.
+    # Keeping the option list in sync with the app avoids a stale stored value
+    # being silently dropped from the dropdown when a user opens the detail panel.
+    API_FORMAT_OPTIONS: Dict[str, List[str]] = {
+        "claude": ["anthropic"],
+        "open-claw": ["openai_chat", "openai_responses"],
+        "openclaw": ["openai_chat", "openai_responses"],
+        "hermes": ["anthropic", "openai_chat", "openai_responses", "chat_completions"],
+        "codex": ["openai_chat", "openai_responses"],
+        "gemini": ["openai_chat", "openai_responses", "gemini"],
+        "open-code": ["openai_chat", "openai_responses"],
+    }
+    # Default api_format per app type (used only when meta JSON has no explicit value)
+    API_FORMAT_DEFAULTS: Dict[str, str] = {
+        "claude": "anthropic",
+        "open-claw": "openai_chat",
+        "openclaw": "openai_chat",
+        "hermes": "chat_completions",
+        "codex": "openai_chat",
+        "gemini": "openai_chat",
+        "open-code": "openai_chat",
+    }
 
     # API Format from meta JSON (settings_config may have stale api_mode/api keys to ignore)
-    meta_json = json.loads(row["meta"]) if row["meta"] else {}
     api_format = meta_json.get("apiFormat", "")
     if not api_format:
-        # Derive default from app_type
-        app_type = row["app_type"]
-        if app_type == "claude":
-            api_format = "anthropic"
-        elif app_type == "openclaw":
-            api_format = "openai_chat"
-        elif app_type == "hermes":
-            api_format = "chat_completions"
-        else:
-            api_format = "unknown"
-    # Insert as api_mode category so it sorts correctly
-    model_fields.insert(0, {
-        "path": ["_api_format"],
-        "label": "API Format",
-        "value": api_format,
-        "category": "api_mode",
-        "options": ["anthropic", "openai_chat"],
-    })
+        api_format = API_FORMAT_DEFAULTS.get(app_type, "unknown")
+
+    # Build the options list for the dropdown. Always include the current value
+    # so a provider whose stored format isn't in the default list (e.g. legacy data)
+    # still displays correctly and can be saved without forcing a change.
+    supported_options = list(API_FORMAT_OPTIONS.get(app_type, []))
+    options: List[str] = list(supported_options)
+    if api_format and api_format not in options:
+        options.append(api_format)
+
+    # Find the schema-driven apiFormat entry and decorate it with options,
+    # rather than duplicating it. If the schema doesn't list apiFormat for this
+    # app_type, fall back to inserting a synthetic entry.
+    api_format_idx = next(
+        (i for i, f in enumerate(model_fields) if f.get("path") == ["apiFormat"]),
+        None,
+    )
+    if api_format_idx is not None:
+        model_fields[api_format_idx]["value"] = api_format
+        model_fields[api_format_idx]["options"] = options
+    else:
+        model_fields.insert(0, {
+            "path": ["_api_format"],
+            "label": "API Format",
+            "value": api_format,
+            "category": "api_mode",
+            "options": options,
+        })
 
     # Meta fields: name and notes are stored as provider columns, not in settings_config
     meta_fields = [
