@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { HashRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
 import Header from './components/Header'
 import ProviderList from './components/ProviderList'
 import SessionList from './components/SessionList'
@@ -14,13 +15,12 @@ export interface Provider {
 }
 
 const tabs = [
-  { id: 'providers' as const, label: 'Providers', icon: '🔌' },
-  { id: 'sessions' as const, label: 'Sessions', icon: '💬' },
-  { id: 'env' as const, label: 'Environment', icon: '🔧' },
+  { id: 'providers', label: 'Providers', icon: '🔌', to: '/providers' },
+  { id: 'sessions', label: 'Sessions', icon: '💬', to: '/sessions' },
+  { id: 'env', label: 'Environment', icon: '🔧', to: '/env' },
 ]
 
-function App() {
-  const [activeTab, setActiveTab] = useState<'providers' | 'sessions' | 'env'>('providers')
+function AppContent() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -80,18 +80,20 @@ function App() {
         {/* Navigation Tabs */}
         <nav className="flex space-x-1 mb-8 p-1 bg-slate-900/50 rounded-xl border border-slate-800/50 w-fit">
           {tabs.map((tab) => (
-            <button
+            <NavLink
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                activeTab === tab.id
-                  ? 'bg-indigo-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
-              }`}
+              to={tab.to}
+              className={({ isActive }) =>
+                `px-5 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${
+                  isActive
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                }`
+              }
             >
               <span className="mr-2">{tab.icon}</span>
               {tab.label}
-            </button>
+            </NavLink>
           ))}
         </nav>
 
@@ -114,22 +116,35 @@ function App() {
         )}
 
         {/* Content */}
-        <div>
-          {activeTab === 'providers' && (
-            <ProviderList
-              providers={providers}
-              loading={loading}
-              onSwitch={handleSwitch}
-              onRefresh={fetchProviders}
-            />
-          )}
-          {activeTab === 'sessions' && <SessionList />}
-          {activeTab === 'env' && <EnvTools />}
-        </div>
+        <Routes>
+          <Route path="/" element={<Navigate to="/providers" replace />} />
+          <Route
+            path="/providers"
+            element={
+              <ProviderList
+                providers={providers}
+                loading={loading}
+                onSwitch={handleSwitch}
+                onRefresh={fetchProviders}
+              />
+            }
+          />
+          <Route path="/sessions" element={<SessionList />} />
+          <Route path="/sessions/:sessionId" element={<SessionList />} />
+          <Route path="/env" element={<EnvTools />} />
+        </Routes>
       </main>
 
       <StatusBar providerCount={providers.length} activeProvider={providers.find(p => p.active)} />
     </div>
+  )
+}
+
+function App() {
+  return (
+    <HashRouter>
+      <AppContent />
+    </HashRouter>
   )
 }
 

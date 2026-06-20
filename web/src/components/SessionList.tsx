@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
 import { copyToClipboard } from '../utils/clipboard'
 
 interface Session {
@@ -40,14 +41,23 @@ interface Message {
 }
 
 function SessionList() {
+  const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>()
+  const navigate = useNavigate()
   const [sessions, setSessions] = useState<Session[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showAll, setShowAll] = useState(false)
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null)
-  const [, setLoadingDetail] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
-  const [viewMode, setViewMode] = useState<'list' | 'detail'>('list')
+  const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
+
+  const handleCopyMessage = async (text: string, idx: number) => {
+    const ok = await copyToClipboard(text)
+    if (ok) {
+      setCopiedMsgId(idx)
+      setTimeout(() => setCopiedMsgId(null), 2000)
+    }
+  }
 
   const fetchSessions = async (all: boolean = false) => {
     setIsLoading(true)
@@ -69,20 +79,22 @@ function SessionList() {
     fetchSessions()
   }, [])
 
-  const handleShowDetail = async (sessionId: string) => {
-    setLoadingDetail(true)
-    setError(null)
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}`)
-      if (!res.ok) throw new Error('Session not found')
-      const data = await res.json()
-      setSelectedSession(data)
-      setViewMode('detail')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load session detail')
-    } finally {
-      setLoadingDetail(false)
+  useEffect(() => {
+    if (!urlSessionId) {
+      setSelectedSession(null)
+      return
     }
+    fetch(`/api/sessions/${urlSessionId}`)
+      .then(res => {
+        if (!res.ok) throw new Error('Session not found')
+        return res.json()
+      })
+      .then(data => setSelectedSession(data))
+      .catch(err => setError(err instanceof Error ? err.message : 'Failed to load session detail'))
+  }, [urlSessionId])
+
+  const handleBackToList = () => {
+    navigate('/sessions')
   }
 
   const formatDate = (ts: number) => {
@@ -130,13 +142,13 @@ function SessionList() {
   )
 
   // Session Detail View
-  if (viewMode === 'detail' && selectedSession) {
+  if (urlSessionId && selectedSession) {
     const s = selectedSession.session
     return (
       <div className="space-y-6">
         {/* Back button */}
         <button
-          onClick={() => { setViewMode('list'); setSelectedSession(null) }}
+          onClick={handleBackToList}
           className="flex items-center text-sm text-slate-400 hover:text-white transition-colors"
         >
           <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -203,7 +215,30 @@ function SessionList() {
                       {getRoleIcon(msg.role)}
                       <span className="ml-1 capitalize">{msg.role}</span>
                     </span>
-                    <span className="text-xs text-slate-500">{formatDate(msg.ts)}</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleCopyMessage(msg.content, idx)}
+                        className="flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-slate-700/40 text-slate-400 hover:bg-slate-600/50 hover:text-slate-200 transition-colors"
+                        title="Copy message"
+                      >
+                        {copiedMsgId === idx ? (
+                          <>
+                            <svg className="w-3 h-3 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                            <span className="text-emerald-400">Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 012-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                            <span>Copy</span>
+                          </>
+                        )}
+                      </button>
+                      <span className="text-xs text-slate-500">{formatDate(msg.ts)}</span>
+                    </div>
                   </div>
                   <pre className="text-sm text-slate-400 font-mono whitespace-pre-wrap break-all overflow-x-auto">
                     {msg.content?.slice(0, 2000)}
@@ -318,7 +353,7 @@ function SessionList() {
               key={session.sessionId}
               className="glass rounded-xl p-5 border border-slate-700/30 hover:border-indigo-500/30 hover:bg-slate-800/40 transition-all cursor-pointer group"
               style={{ animation: `slideIn 0.3s ease-out ${index * 0.04}s both` }}
-              onClick={() => handleShowDetail(session.sessionId)}
+              onClick={() => navigate(`/sessions/${session.sessionId}`)}
             >
               <div className="flex items-start justify-between mb-3">
                 <div className="flex-1 min-w-0">
